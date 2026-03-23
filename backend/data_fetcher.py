@@ -1,3 +1,10 @@
+"""
+Data fetcher — priority order:
+  1. Zerodha Kite Connect  (real-time, official NSE feed)
+  2. Yahoo Finance / yfinance  (fallback, free)
+  3. Mock data generator  (offline demo)
+"""
+
 import yfinance as yf
 import pandas as pd
 from typing import Optional
@@ -5,7 +12,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Popular NSE stocks with company names
+# ── NSE stock registry ────────────────────────────────────────────────────────
 NSE_STOCKS = {
     "RELIANCE.NS": "Reliance Industries",
     "TCS.NS": "Tata Consultancy Services",
@@ -39,16 +46,6 @@ NSE_STOCKS = {
     "DIVISLAB.NS": "Divi's Laboratories",
 }
 
-INTERVALS = {
-    "1m": "1 minute",
-    "5m": "5 minutes",
-    "15m": "15 minutes",
-    "30m": "30 minutes",
-    "1h": "1 hour",
-    "1d": "1 day",
-    "1wk": "1 week",
-}
-
 PERIOD_FOR_INTERVAL = {
     "1m": "7d",
     "5m": "60d",
@@ -60,57 +57,120 @@ PERIOD_FOR_INTERVAL = {
 }
 
 
+# ── Public API ─────────────────────────────────────────────────────────────────
+
 def get_stock_data(symbol: str, interval: str = "1d", period: Optional[str] = None) -> pd.DataFrame:
-    """Fetch OHLCV data for an NSE stock. Falls back to mock data if network unavailable."""
+    """Fetch OHLCV candle data. Tries Kite → yfinance → mock, in that order."""
     if not symbol.endswith(".NS"):
         symbol = symbol + ".NS"
 
+    # 1. Kite Connect
+    df = _kite_data(symbol, interval)
+    if df is not None and not df.empty:
+        return df
+
+    # 2. yfinance
+    df = _yfinance_data(symbol, interval, period)
+    if df is not None and not df.empty:
+        return df
+
+    # 3. Mock fallback
+    logger.info(f"Using mock data for {symbol} [{interval}]")
+    return _get_mock_data(symbol, interval)
+
+
+def get_realtime_quote(symbol: str) -> dict:
+    """Get current price quote. Tries Kite → yfinance → mock."""
+    if not symbol.endswith(".NS"):
+        symbol = symbol + ".NS"
+
+    # 1. Kite Connect
+    quote = _kite_quote(symbol)
+    if quote:
+        return quote
+
+    # 2. yfinance
+    quote = _yfinance_quote(symbol)
+    if quote:
+        return quote
+
+    # 3. Mock fallback
+    try:
+        from mock_data import generate_mock_quote
+        return generate_mock_quote(symbol)
+    except Exception:
+        return {"symbol": symbol, "error": "All data sources failed"}
+
+
+def get_all_stocks() -> list:
+    return [{"symbol": sym, "name": name} for sym, name in NSE_STOCKS.items()]
+
+
+def search_stock(query: str) -> list:
+    query = query.upper()
+    return [
+        {"symbol": sym, "name": name}
+        for sym, name in NSE_STOCKS.items()
+        if query in sym or query in name.upper()
+    ]
+
+
+# ── Kite helpers ───────────────────────────────────────────────────────────────
+
+def _kite_data(symbol: str, interval: str) -> Optional[pd.DataFrame]:
+    try:
+        import kite_config
+        if not kite_config.is_authenticated():
+            return None
+        from kite_fetcher import kite_historical
+        return kite_historical(symbol, interval)
+    except Exception as e:
+        logger.debug(f"Kite historical skipped for {symbol}: {e}")
+        return None
+
+
+def _kite_quote(symbol: str) -> Optional[dict]:
+    try:
+        import kite_config
+        if not kite_config.is_authenticated():
+            return None
+        from kite_fetcher import kite_quote
+        return kite_quote(symbol)
+    except Exception as e:
+        logger.debug(f"Kite quote skipped for {symbol}: {e}")
+        return None
+
+
+# ── yfinance helpers ───────────────────────────────────────────────────────────
+
+def _yfinance_data(symbol: str, interval: str, period: Optional[str]) -> Optional[pd.DataFrame]:
     if period is None:
         period = PERIOD_FOR_INTERVAL.get(interval, "1y")
-
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
         if df.empty:
-            logger.warning(f"No data returned for {symbol}, using mock data")
-            return _get_mock_data(symbol, interval)
-
+            return None
         df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
         df.columns = ["open", "high", "low", "close", "volume"]
         df.index.name = "timestamp"
-        df = df.dropna()
-        return df
+        return df.dropna()
     except Exception as e:
-        logger.warning(f"Network error for {symbol} ({e}), using mock data")
-        return _get_mock_data(symbol, interval)
+        logger.debug(f"yfinance data failed for {symbol}: {e}")
+        return None
 
 
-def _get_mock_data(symbol: str, interval: str) -> pd.DataFrame:
-    """Return mock OHLCV data for demo/offline mode."""
-    try:
-        from mock_data import generate_mock_ohlcv
-        n_map = {"1m": 200, "5m": 200, "15m": 200, "30m": 150, "1h": 200, "1d": 500, "1wk": 260}
-        n = n_map.get(interval, 252)
-        return generate_mock_ohlcv(symbol, n=n, interval=interval)
-    except Exception as e:
-        logger.error(f"Mock data generation failed: {e}")
-        return pd.DataFrame()
-
-
-def get_realtime_quote(symbol: str) -> dict:
-    """Get current price info for a stock. Falls back to mock data if network unavailable."""
-    if not symbol.endswith(".NS"):
-        symbol = symbol + ".NS"
-
+def _yfinance_quote(symbol: str) -> Optional[dict]:
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.fast_info
         hist = ticker.history(period="2d", interval="1d")
+        if hist.empty:
+            return None
 
         prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else 0.0
-        current = float(info.get("lastPrice", 0) or info.get("regularMarketPreviousClose", 0))
-
-        if current == 0 and not hist.empty:
+        current = float(info.get("lastPrice") or 0)
+        if current == 0:
             current = float(hist["Close"].iloc[-1])
 
         change = current - prev_close
@@ -123,32 +183,26 @@ def get_realtime_quote(symbol: str) -> dict:
             "prev_close": round(prev_close, 2),
             "change": round(change, 2),
             "change_pct": round(change_pct, 2),
-            "day_high": round(float(info.get("dayHigh", current) or current), 2),
-            "day_low": round(float(info.get("dayLow", current) or current), 2),
-            "volume": int(info.get("lastVolume", 0) or 0),
-            "year_high": round(float(info.get("yearHigh", 0) or 0), 2),
-            "year_low": round(float(info.get("yearLow", 0) or 0), 2),
-            "market_cap": int(info.get("marketCap", 0) or 0),
+            "day_high": round(float(info.get("dayHigh") or current), 2),
+            "day_low": round(float(info.get("dayLow") or current), 2),
+            "volume": int(info.get("lastVolume") or 0),
+            "year_high": round(float(info.get("yearHigh") or 0), 2),
+            "year_low": round(float(info.get("yearLow") or 0), 2),
+            "market_cap": int(info.get("marketCap") or 0),
+            "_source": "yfinance",
         }
     except Exception as e:
-        logger.warning(f"Quote fetch failed for {symbol} ({e}), using mock")
-        try:
-            from mock_data import generate_mock_quote
-            return generate_mock_quote(symbol)
-        except Exception:
-            return {"symbol": symbol, "error": str(e)}
+        logger.debug(f"yfinance quote failed for {symbol}: {e}")
+        return None
 
 
-def get_all_stocks() -> list:
-    """Return list of available NSE stocks."""
-    return [{"symbol": sym, "name": name} for sym, name in NSE_STOCKS.items()]
+# ── Mock helper ────────────────────────────────────────────────────────────────
 
-
-def search_stock(query: str) -> list:
-    """Search stocks by symbol or name."""
-    query = query.upper()
-    results = []
-    for sym, name in NSE_STOCKS.items():
-        if query in sym or query in name.upper():
-            results.append({"symbol": sym, "name": name})
-    return results
+def _get_mock_data(symbol: str, interval: str) -> pd.DataFrame:
+    try:
+        from mock_data import generate_mock_ohlcv
+        n_map = {"1m": 200, "5m": 200, "15m": 200, "30m": 150, "1h": 200, "1d": 500, "1wk": 260}
+        return generate_mock_ohlcv(symbol, n=n_map.get(interval, 252), interval=interval)
+    except Exception as e:
+        logger.error(f"Mock data generation failed: {e}")
+        return pd.DataFrame()
