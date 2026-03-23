@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NSE Candle Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="header">
+  <div class="header-left">
+    <span class="logo">&#9650; NSE Candle Analyzer</span>
+    <span class="market-status" id="marketStatus">&#9679; Loading...</span>
+  </div>
+  <div class="header-right">
+    <div class="search-wrap">
+      <input id="searchInput" type="text" placeholder="Search stock (e.g. RELIANCE, TCS)..." autocomplete="off" />
+      <ul id="searchDropdown" class="dropdown hidden"></ul>
+    </div>
+  </div>
+</header>
+
+<!-- ── Main layout ── -->
+<div class="layout">
+
+  <!-- Left: Watchlist -->
+  <aside class="sidebar">
+    <h3 class="sidebar-title">Watchlist</h3>
+    <ul id="watchlist" class="watchlist"></ul>
+  </aside>
+
+  <!-- Center: Chart + Analysis -->
+  <main class="main">
+
+    <!-- Stock header bar -->
+    <div class="stock-bar" id="stockBar">
+      <div class="stock-title">
+        <span id="stockName">Select a stock</span>
+        <span id="stockSymbol" class="chip"></span>
+      </div>
+      <div class="stock-price-block">
+        <span id="stockPrice" class="price">--</span>
+        <span id="stockChange" class="change">--</span>
+      </div>
+      <div class="stock-meta">
+        <span>H: <b id="dayHigh">--</b></span>
+        <span>L: <b id="dayLow">--</b></span>
+        <span>Vol: <b id="stockVol">--</b></span>
+        <span>52W H: <b id="yearHigh">--</b></span>
+        <span>52W L: <b id="yearLow">--</b></span>
+      </div>
+    </div>
+
+    <!-- Interval selector -->
+    <div class="interval-bar">
+      <span class="label">Interval:</span>
+      <div class="interval-btns" id="intervalBtns">
+        <button class="int-btn" data-interval="1m">1m</button>
+        <button class="int-btn" data-interval="5m">5m</button>
+        <button class="int-btn" data-interval="15m">15m</button>
+        <button class="int-btn" data-interval="30m">30m</button>
+        <button class="int-btn" data-interval="1h">1h</button>
+        <button class="int-btn active" data-interval="1d">1D</button>
+        <button class="int-btn" data-interval="1wk">1W</button>
+      </div>
+      <button id="analyzeBtn" class="analyze-btn" disabled>Analyze</button>
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-container">
+      <canvas id="candleChart"></canvas>
+      <div id="chartLoading" class="chart-loading hidden">
+        <div class="spinner"></div><span>Fetching data...</span>
+      </div>
+      <div id="chartEmpty" class="chart-empty">
+        <span>&#9650; Select a stock to start analysis</span>
+      </div>
+    </div>
+
+    <!-- Signal panel -->
+    <div id="signalPanel" class="signal-panel hidden">
+      <div id="overallSignal" class="overall-signal">
+        <span id="signalBadge" class="signal-badge">--</span>
+        <div>
+          <div id="signalText" class="signal-text">--</div>
+          <div id="signalConfidence" class="signal-conf">Confidence: --%</div>
+        </div>
+      </div>
+      <div id="recommendation" class="recommendation"></div>
+    </div>
+
+    <!-- Patterns + Backtest tabs -->
+    <div id="analysisSection" class="analysis-section hidden">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="patterns">Patterns Detected</button>
+        <button class="tab-btn" data-tab="backtest">Backtest Results</button>
+      </div>
+      <div id="patternsTab" class="tab-content active">
+        <div id="patternsList" class="patterns-list"></div>
+      </div>
+      <div id="backtestTab" class="tab-content">
+        <div id="backtestList" class="backtest-list"></div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Right: Live signals feed -->
+  <aside class="sidebar right-sidebar">
+    <h3 class="sidebar-title">Live Feed</h3>
+    <div id="liveFeed" class="live-feed">
+      <p class="feed-placeholder">Connect to a stock for live updates</p>
+    </div>
+    <div id="wsStatus" class="ws-status">&#9675; Disconnected</div>
+  </aside>
+
+</div>
+
+<!-- Chart.js from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- Chart.js financial addon (candlestick) -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.1.1/dist/chartjs-chart-financial.min.js"></script>
+<!-- date adapter -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
