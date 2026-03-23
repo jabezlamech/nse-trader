@@ -1,13 +1,15 @@
-/* NSE Candle Analyzer – Frontend App */
+/* NSE Candle Analyzer — Frontend */
 
-const API = '';  // same origin; set to 'http://localhost:8000' if separate
-let currentSymbol = null;
+const API = '';   // same origin; change to 'http://localhost:8000' if running separately
+let currentSymbol  = null;
 let currentInterval = '1d';
-let chart = null;
-let ws = null;
+let chart          = null;
+let candleSeries   = null;
+let volumeSeries   = null;
+let ws             = null;
 let wsReconnectTimer = null;
 
-// ── Utility ──────────────────────────────────────────────────────────────────
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 function fmt(n) {
   if (n == null || isNaN(n)) return '--';
@@ -18,44 +20,35 @@ function fmt(n) {
 
 function fmtPct(n) {
   if (n == null || isNaN(n)) return '--';
-  const sign = n >= 0 ? '+' : '';
-  return sign + n.toFixed(2) + '%';
+  return (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%';
 }
 
-function now() {
+function nowTime() {
   return new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function signalColor(sig) {
-  if (sig === 'BUY') return '#3fb950';
-  if (sig === 'SELL') return '#f85149';
-  return '#d29922';
+  return sig === 'BUY' ? '#3fb950' : sig === 'SELL' ? '#f85149' : '#d29922';
 }
 
 // ── Market status ─────────────────────────────────────────────────────────────
 
 function updateMarketStatus() {
-  const el = document.getElementById('marketStatus');
+  const el  = document.getElementById('marketStatus');
   const now = new Date();
-  // IST = UTC+5:30
-  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
-  const h = ist.getUTCHours(), m = ist.getUTCMinutes(), day = ist.getUTCDay();
-  const open = (h > 9 || (h === 9 && m >= 15)) && (h < 15 || (h === 15 && m <= 30));
-  const weekday = day >= 1 && day <= 5;
-  if (weekday && open) {
-    el.textContent = '● NSE Market Open';
-    el.className = 'market-status open';
-  } else {
-    el.textContent = '● NSE Market Closed';
-    el.className = 'market-status closed';
-  }
+  const ist = new Date(now.getTime() + 5.5 * 3600 * 1000);
+  const h   = ist.getUTCHours(), m = ist.getUTCMinutes(), day = ist.getUTCDay();
+  const open = day >= 1 && day <= 5 && (h > 9 || (h === 9 && m >= 15)) && (h < 15 || (h === 15 && m <= 30));
+  el.textContent  = open ? '● NSE Market Open' : '● NSE Market Closed';
+  el.className    = 'market-status ' + (open ? 'open' : 'closed');
 }
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
 
 async function loadWatchlist() {
   try {
-    const res = await fetch(`${API}/api/watchlist`);
+    const res    = await fetch(`${API}/api/watchlist`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const quotes = await res.json();
     renderWatchlist(quotes);
   } catch (e) {
@@ -67,15 +60,14 @@ function renderWatchlist(quotes) {
   const ul = document.getElementById('watchlist');
   ul.innerHTML = '';
   quotes.forEach(q => {
+    const up = (q.change_pct || 0) >= 0;
     const li = document.createElement('li');
-    const up = q.change_pct >= 0;
     li.dataset.symbol = q.symbol;
     li.innerHTML = `
       <span class="wl-symbol">${(q.symbol || '').replace('.NS', '')}</span>
       <span class="wl-name">${q.company_name || ''}</span>
       <span class="wl-price">₹${fmt(q.current_price)}</span>
-      <span class="wl-chg ${up ? 'up' : 'down'}">${fmtPct(q.change_pct)}</span>
-    `;
+      <span class="wl-chg ${up ? 'up' : 'down'}">${fmtPct(q.change_pct)}</span>`;
     li.addEventListener('click', () => selectStock(q.symbol));
     ul.appendChild(li);
   });
@@ -83,7 +75,7 @@ function renderWatchlist(quotes) {
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
-const searchInput = document.getElementById('searchInput');
+const searchInput    = document.getElementById('searchInput');
 const searchDropdown = document.getElementById('searchDropdown');
 let searchTimer = null;
 
@@ -104,7 +96,7 @@ document.addEventListener('click', e => {
 
 async function doSearch(q) {
   try {
-    const res = await fetch(`${API}/api/stocks/search?q=${encodeURIComponent(q)}`);
+    const res    = await fetch(`${API}/api/stocks/search?q=${encodeURIComponent(q)}`);
     const stocks = await res.json();
     renderDropdown(stocks);
   } catch (e) { console.error(e); }
@@ -129,16 +121,14 @@ function renderDropdown(stocks) {
   searchDropdown.classList.remove('hidden');
 }
 
-// ── Stock Selection ───────────────────────────────────────────────────────────
+// ── Stock selection ───────────────────────────────────────────────────────────
 
 function selectStock(symbol) {
   currentSymbol = symbol;
-  // Highlight watchlist
-  document.querySelectorAll('.watchlist li').forEach(li => {
-    li.classList.toggle('active', li.dataset.symbol === symbol);
-  });
+  document.querySelectorAll('.watchlist li').forEach(li =>
+    li.classList.toggle('active', li.dataset.symbol === symbol));
   document.getElementById('analyzeBtn').disabled = false;
-  runAnalysis();
+  loadCandlesAndQuote();   // step 1: chart + quote
 }
 
 // ── Interval buttons ──────────────────────────────────────────────────────────
@@ -149,34 +139,73 @@ document.getElementById('intervalBtns').addEventListener('click', e => {
   document.querySelectorAll('.int-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   currentInterval = btn.dataset.interval;
-  if (currentSymbol) runAnalysis();
+  if (currentSymbol) loadCandlesAndQuote();
 });
 
 document.getElementById('analyzeBtn').addEventListener('click', () => {
   if (currentSymbol) runAnalysis();
 });
 
-// ── Analysis ──────────────────────────────────────────────────────────────────
+// ── Step 1: load chart + quote (fast) ─────────────────────────────────────────
 
-async function runAnalysis() {
+async function loadCandlesAndQuote() {
   if (!currentSymbol) return;
 
-  showChartLoading(true);
+  setChartLoading(true);
+  hideChartError();
   hideEmpty();
   document.getElementById('signalPanel').classList.add('hidden');
   document.getElementById('analysisSection').classList.add('hidden');
 
   try {
-    const [candlesRes, analysisRes] = await Promise.all([
-      fetch(`${API}/api/candles/${currentSymbol}?interval=${currentInterval}&limit=120`),
-      fetch(`${API}/api/analyze/${currentSymbol}?interval=${currentInterval}&backtest=true`)
+    const [candlesRes, quoteRes] = await Promise.all([
+      fetch(`${API}/api/candles/${currentSymbol}?interval=${currentInterval}&limit=150`),
+      fetch(`${API}/api/quote/${currentSymbol}`)
     ]);
 
+    if (!candlesRes.ok) {
+      const err = await candlesRes.json().catch(() => ({}));
+      throw new Error(err.detail || `Candles API returned ${candlesRes.status}`);
+    }
+
     const candleData = await candlesRes.json();
-    const analysis = await analysisRes.json();
+    const quote      = quoteRes.ok ? await quoteRes.json() : {};
+
+    renderStockBar(quote);
+    renderChart(candleData.candles, candleData.symbol);
+    connectWebSocket(currentSymbol);
+
+  } catch (e) {
+    console.error('Chart load error:', e);
+    setChartLoading(false);
+    showChartError(`Could not load chart: ${e.message}`);
+  } finally {
+    setChartLoading(false);
+  }
+}
+
+// ── Step 2: run full analysis + backtest (slow, on demand) ────────────────────
+
+async function runAnalysis() {
+  if (!currentSymbol) return;
+
+  document.getElementById('analyzeLoading').classList.remove('hidden');
+  document.getElementById('signalPanel').classList.add('hidden');
+  document.getElementById('analysisSection').classList.add('hidden');
+
+  try {
+    const res = await fetch(
+      `${API}/api/analyze/${currentSymbol}?interval=${currentInterval}&backtest=true`
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Analysis API returned ${res.status}`);
+    }
+
+    const analysis = await res.json();
 
     renderStockBar(analysis);
-    renderChart(candleData.candles);
     renderSignalPanel(analysis);
     renderPatterns(analysis.patterns_detected || []);
     renderBacktest(analysis.backtest_results || []);
@@ -184,133 +213,140 @@ async function runAnalysis() {
     document.getElementById('signalPanel').classList.remove('hidden');
     document.getElementById('analysisSection').classList.remove('hidden');
 
-    connectWebSocket(currentSymbol);
-
   } catch (e) {
     console.error('Analysis error:', e);
-    showChartLoading(false);
-    showEmpty('Error loading data. Please try again.');
+    alert(`Analysis failed: ${e.message}`);
   } finally {
-    showChartLoading(false);
+    document.getElementById('analyzeLoading').classList.add('hidden');
   }
 }
 
 // ── Stock bar ─────────────────────────────────────────────────────────────────
 
 function renderStockBar(data) {
-  document.getElementById('stockName').textContent = data.company_name || data.symbol;
+  if (!data || !data.symbol) return;
+
+  document.getElementById('stockName').textContent   = data.company_name || data.symbol;
   document.getElementById('stockSymbol').textContent = (data.symbol || '').replace('.NS', '');
-  document.getElementById('stockPrice').textContent = '₹' + fmt(data.current_price);
+
+  // Data source badge
+  const badge = document.getElementById('dataSourceBadge');
+  const src   = data.data_source || data._source;
+  if (src) {
+    badge.textContent = src === 'kite' ? '● Kite Live' : src === 'yfinance' ? 'Yahoo Finance' : 'Demo Mode';
+    badge.className   = 'source-badge ' + (src === 'kite' ? 'live' : src === 'yfinance' ? 'yfin' : 'demo');
+  } else {
+    badge.classList.add('hidden');
+  }
+
+  const price = data.current_price || 0;
+  document.getElementById('stockPrice').textContent = '₹' + fmt(price);
+
   const chgEl = document.getElementById('stockChange');
-  const up = data.change >= 0;
+  const up    = (data.change || 0) >= 0;
   chgEl.textContent = `${up ? '+' : ''}${fmt(data.change)} (${fmtPct(data.change_pct)})`;
-  chgEl.className = 'change ' + (up ? 'up' : 'down');
-  document.getElementById('dayHigh').textContent = '₹' + fmt(data.day_high);
-  document.getElementById('dayLow').textContent = '₹' + fmt(data.day_low);
+  chgEl.className   = 'change ' + (up ? 'up' : 'down');
+
+  document.getElementById('dayHigh').textContent  = '₹' + fmt(data.day_high);
+  document.getElementById('dayLow').textContent   = '₹' + fmt(data.day_low);
   document.getElementById('stockVol').textContent = fmt(data.volume);
   document.getElementById('yearHigh').textContent = '₹' + fmt(data.year_high);
-  document.getElementById('yearLow').textContent = '₹' + fmt(data.year_low);
+  document.getElementById('yearLow').textContent  = '₹' + fmt(data.year_low);
 }
 
-// ── Chart ─────────────────────────────────────────────────────────────────────
+// ── TradingView Lightweight Chart ─────────────────────────────────────────────
 
-function renderChart(candles) {
-  const ctx = document.getElementById('candleChart').getContext('2d');
+function renderChart(candles, symbol) {
+  const container = document.getElementById('candleChart');
+  container.innerHTML = '';   // clear old chart
 
-  if (chart) { chart.destroy(); chart = null; }
+  if (!candles || !candles.length) {
+    showChartError('No candle data returned for this symbol/interval.');
+    return;
+  }
 
-  // Build candlestick data
-  const ohlc = candles.map(c => ({
-    x: new Date(c.timestamp).getTime(),
-    o: c.open, h: c.high, l: c.low, c: c.close
-  }));
-
-  const volData = candles.map(c => ({
-    x: new Date(c.timestamp).getTime(),
-    y: c.volume
-  }));
-
-  chart = new Chart(ctx, {
-    type: 'candlestick',
-    data: {
-      datasets: [
-        {
-          label: 'Price',
-          data: ohlc,
-          color: {
-            up: '#3fb950',
-            down: '#f85149',
-            unchanged: '#8b949e',
-          },
-          borderColor: {
-            up: '#3fb950',
-            down: '#f85149',
-            unchanged: '#8b949e',
-          },
-          yAxisID: 'y',
-        },
-        {
-          label: 'Volume',
-          type: 'bar',
-          data: volData,
-          backgroundColor: candles.map(c =>
-            c.close >= c.open ? 'rgba(63,185,80,0.25)' : 'rgba(248,81,73,0.25)'
-          ),
-          borderWidth: 0,
-          yAxisID: 'volume',
-        }
-      ]
+  // Create chart
+  chart = LightweightCharts.createChart(container, {
+    width:  container.clientWidth,
+    height: container.clientHeight || 340,
+    layout: {
+      background: { color: '#161b22' },
+      textColor:  '#8b949e',
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => {
-              if (ctx.dataset.label === 'Volume') return `Vol: ${fmt(ctx.raw.y)}`;
-              const d = ctx.raw;
-              return [`O: ${d.o}`, `H: ${d.h}`, `L: ${d.l}`, `C: ${d.c}`];
-            }
-          }
-        }
-      },
-      scales: {
-        x: {
-          type: 'timeseries',
-          ticks: { color: '#8b949e', maxTicksLimit: 10 },
-          grid: { color: '#21262d' },
-          time: { tooltipFormat: 'dd MMM yyyy' }
-        },
-        y: {
-          position: 'right',
-          ticks: { color: '#8b949e' },
-          grid: { color: '#21262d' },
-        },
-        volume: {
-          position: 'left',
-          ticks: { color: '#8b949e', maxTicksLimit: 4 },
-          grid: { drawOnChartArea: false },
-          max: val => val * 4,
-        }
-      }
+    grid: {
+      vertLines: { color: '#21262d' },
+      horzLines: { color: '#21262d' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#30363d' },
+    timeScale: {
+      borderColor:     '#30363d',
+      timeVisible:     true,
+      secondsVisible:  false,
+    },
+  });
+
+  // Candlestick series
+  candleSeries = chart.addCandlestickSeries({
+    upColor:      '#3fb950',
+    downColor:    '#f85149',
+    borderUpColor:   '#3fb950',
+    borderDownColor: '#f85149',
+    wickUpColor:     '#3fb950',
+    wickDownColor:   '#f85149',
+  });
+
+  // Volume histogram
+  volumeSeries = chart.addHistogramSeries({
+    priceFormat:    { type: 'volume' },
+    priceScaleId:   'vol',
+    scaleMargins:   { top: 0.8, bottom: 0 },
+  });
+  chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+  // Transform candle data for lightweight-charts
+  const ohlc = [];
+  const vols = [];
+
+  candles.forEach(c => {
+    // lightweight-charts wants Unix timestamp (seconds) for intraday, or 'YYYY-MM-DD' for daily
+    const d   = new Date(c.timestamp);
+    const ts  = Math.floor(d.getTime() / 1000);
+
+    if (!isNaN(ts) && c.open != null) {
+      ohlc.push({ time: ts, open: c.open, high: c.high, low: c.low, close: c.close });
+      vols.push({
+        time:  ts,
+        value: c.volume,
+        color: c.close >= c.open ? 'rgba(63,185,80,0.35)' : 'rgba(248,81,73,0.35)',
+      });
     }
+  });
+
+  // Sort ascending (required by lightweight-charts)
+  ohlc.sort((a, b) => a.time - b.time);
+  vols.sort((a, b) => a.time - b.time);
+
+  candleSeries.setData(ohlc);
+  volumeSeries.setData(vols);
+  chart.timeScale().fitContent();
+
+  // Resize on window resize
+  window.addEventListener('resize', () => {
+    if (chart) chart.applyOptions({ width: container.clientWidth });
   });
 }
 
 // ── Signal Panel ──────────────────────────────────────────────────────────────
 
 function renderSignalPanel(data) {
-  const sig = data.overall_signal || 'NEUTRAL';
+  const sig   = data.overall_signal || 'NEUTRAL';
   const badge = document.getElementById('signalBadge');
   badge.textContent = sig;
-  badge.className = 'signal-badge ' + sig;
+  badge.className   = 'signal-badge ' + sig;
 
   document.getElementById('signalText').textContent =
-    sig === 'BUY' ? 'Bullish Signal' :
-    sig === 'SELL' ? 'Bearish Signal' : 'Neutral / Indecision';
+    sig === 'BUY' ? 'Bullish Signal' : sig === 'SELL' ? 'Bearish Signal' : 'Neutral / Indecision';
 
   document.getElementById('signalConfidence').textContent =
     `Confidence: ${data.overall_confidence || 0}%`;
@@ -322,67 +358,54 @@ function renderSignalPanel(data) {
 // ── Patterns ──────────────────────────────────────────────────────────────────
 
 function renderPatterns(patterns) {
-  const container = document.getElementById('patternsList');
+  const el = document.getElementById('patternsList');
   if (!patterns.length) {
-    container.innerHTML = '<p class="no-patterns">No classic candlestick patterns detected in recent candles.</p>';
+    el.innerHTML = '<p class="no-patterns">No classic patterns detected in the latest candles.</p>';
     return;
   }
-
-  container.innerHTML = patterns.map(p => `
+  el.innerHTML = patterns.map(p => `
     <div class="pattern-card">
-      <div>
+      <div style="flex:1">
         <div class="p-name">${p.pattern_name}</div>
         <div class="p-desc">${p.description}</div>
-        <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">
-          Candles: ${p.candles_involved}
-        </div>
+        <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">Candles: ${p.candles_involved}</div>
       </div>
       <span class="p-badge ${p.signal}">${p.signal}</span>
       <span class="p-conf">Confidence<br/><b>${p.confidence}%</b></span>
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 // ── Backtest ──────────────────────────────────────────────────────────────────
 
 function renderBacktest(results) {
-  const container = document.getElementById('backtestList');
+  const el = document.getElementById('backtestList');
   if (!results.length) {
-    container.innerHTML = '<p class="no-patterns">Run analysis with more history to see backtest results.</p>';
+    el.innerHTML = '<p class="no-patterns">Insufficient history for backtest. Try a longer interval (1D, 1W).</p>';
     return;
   }
-
   const rows = results.map(r => {
-    const erClass = r.expected_return >= 0 ? 'positive' : 'negative';
-    const barW = Math.min(100, Math.round(r.win_rate)) + '%';
-    const sigColor = signalColor(r.signal);
-    return `
-      <tr>
-        <td><b>${r.pattern_name}</b></td>
-        <td><span style="color:${sigColor};font-weight:700">${r.signal}</span></td>
-        <td>
-          ${r.win_rate}%
-          <span class="win-rate-bar" style="width:${barW};background:${sigColor}"></span>
-        </td>
-        <td>${r.total_occurrences} <span style="color:var(--text-muted)">(${r.successful_trades} wins)</span></td>
-        <td style="color:var(--green)">+${r.avg_gain_pct}%</td>
-        <td style="color:var(--red)">-${r.avg_loss_pct}%</td>
-        <td class="er ${erClass}">${r.expected_return >= 0 ? '+' : ''}${r.expected_return}%</td>
-      </tr>
-    `;
+    const er  = r.expected_return;
+    const col = signalColor(r.signal);
+    return `<tr>
+      <td><b>${r.pattern_name}</b></td>
+      <td><span style="color:${col};font-weight:700">${r.signal}</span></td>
+      <td>${r.win_rate}%
+        <span class="win-rate-bar" style="width:${Math.min(r.win_rate,100)}%;background:${col}"></span>
+      </td>
+      <td>${r.total_occurrences} <span style="color:var(--text-muted)">(${r.successful_trades} wins)</span></td>
+      <td style="color:var(--green)">+${r.avg_gain_pct}%</td>
+      <td style="color:var(--red)">-${r.avg_loss_pct}%</td>
+      <td class="er ${er >= 0 ? 'positive' : 'negative'}">${er >= 0 ? '+' : ''}${er}%</td>
+    </tr>`;
   }).join('');
 
-  container.innerHTML = `
-    <table class="bt-table">
-      <thead>
-        <tr>
-          <th>Pattern</th><th>Signal</th><th>Win Rate</th><th>Trades</th>
-          <th>Avg Gain</th><th>Avg Loss</th><th>Exp. Return</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+  el.innerHTML = `<table class="bt-table">
+    <thead><tr>
+      <th>Pattern</th><th>Signal</th><th>Win Rate</th><th>Trades</th>
+      <th>Avg Gain</th><th>Avg Loss</th><th>Exp. Return</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -403,79 +426,85 @@ function connectWebSocket(symbol) {
   clearTimeout(wsReconnectTimer);
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const host = location.host || 'localhost:8000';
-  const url = `${proto}://${host}/ws/${symbol}?interval=${currentInterval}`;
-
-  ws = new WebSocket(url);
+  const host  = location.host || 'localhost:8000';
+  ws = new WebSocket(`${proto}://${host}/ws/${symbol}?interval=${currentInterval}`);
 
   ws.onopen = () => {
-    document.getElementById('wsStatus').textContent = '● Live (15s updates)';
-    document.getElementById('wsStatus').className = 'ws-status connected';
+    document.getElementById('wsStatus').textContent = '● Live updates on';
+    document.getElementById('wsStatus').className   = 'ws-status connected';
   };
 
   ws.onmessage = e => {
     try {
       const data = JSON.parse(e.data);
-      if (data.type === 'update' && data.symbol === currentSymbol) {
-        handleLiveUpdate(data);
+      if (data.type === 'heartbeat') return;
+      if ((data.type === 'update' || data.type === 'tick') && data.symbol === currentSymbol) {
+        handleLiveData(data);
       }
     } catch (_) {}
   };
 
   ws.onclose = () => {
     document.getElementById('wsStatus').textContent = '○ Reconnecting...';
-    document.getElementById('wsStatus').className = 'ws-status';
-    wsReconnectTimer = setTimeout(() => {
-      if (currentSymbol) connectWebSocket(currentSymbol);
-    }, 5000);
+    document.getElementById('wsStatus').className   = 'ws-status';
+    wsReconnectTimer = setTimeout(() => { if (currentSymbol) connectWebSocket(currentSymbol); }, 5000);
   };
 
   ws.onerror = () => ws.close();
 }
 
-function handleLiveUpdate(data) {
-  // Update price in stock bar
-  if (data.quote && data.quote.current_price) {
-    document.getElementById('stockPrice').textContent = '₹' + fmt(data.quote.current_price);
-    const chgEl = document.getElementById('stockChange');
-    const up = data.quote.change >= 0;
-    chgEl.textContent = `${up ? '+' : ''}${fmt(data.quote.change)} (${fmtPct(data.quote.change_pct)})`;
-    chgEl.className = 'change ' + (up ? 'up' : 'down');
+function handleLiveData(data) {
+  const q = data.quote || data.tick || {};
+
+  // Update price bar
+  if (q.last_price || q.current_price) {
+    const price = q.last_price || q.current_price;
+    document.getElementById('stockPrice').textContent = '₹' + fmt(price);
   }
 
-  // Add to live feed
-  if (data.patterns && data.patterns.length) {
-    addFeedItem(data);
+  if (q.change !== undefined || q.net_change !== undefined) {
+    const chg    = q.change ?? q.net_change ?? 0;
+    const chgPct = q.change_pct ?? 0;
+    const up     = chg >= 0;
+    const chgEl  = document.getElementById('stockChange');
+    chgEl.textContent = `${up ? '+' : ''}${fmt(chg)} (${fmtPct(chgPct)})`;
+    chgEl.className   = 'change ' + (up ? 'up' : 'down');
   }
+
+  // Update live chart candle
+  if (candleSeries && q.ohlc) {
+    const ohlc = q.ohlc;
+    const ts   = Math.floor(Date.now() / 1000);
+    candleSeries.update({ time: ts, open: ohlc.open, high: ohlc.high, low: ohlc.low, close: q.last_price || ohlc.close });
+  }
+
+  // Live feed
+  if (data.patterns && data.patterns.length) addFeedItem(data);
 }
 
 function addFeedItem(data) {
-  const feed = document.getElementById('liveFeed');
+  const feed        = document.getElementById('liveFeed');
   const placeholder = feed.querySelector('.feed-placeholder');
   if (placeholder) placeholder.remove();
 
-  const sig = data.overall_signal || 'NEUTRAL';
+  const sig        = data.overall_signal || 'NEUTRAL';
   const topPattern = data.patterns[0]?.pattern_name || 'Update';
-  const price = data.quote?.current_price || '--';
+  const price      = data.quote?.current_price || data.tick?.last_price || '--';
 
-  const div = document.createElement('div');
-  div.className = `feed-item ${sig}`;
-  div.innerHTML = `
+  const div       = document.createElement('div');
+  div.className   = `feed-item ${sig}`;
+  div.innerHTML   = `
     <b>${(data.symbol || '').replace('.NS', '')}</b> — ${topPattern}
     <span style="color:${signalColor(sig)};font-weight:700"> ${sig}</span>
     <span style="float:right;color:var(--text-muted)">₹${fmt(price)}</span>
-    <span class="feed-time">${now()}</span>
-  `;
-
+    <span class="feed-time">${nowTime()}</span>`;
   feed.insertBefore(div, feed.firstChild);
-
-  // Keep feed max 20 items
   while (feed.children.length > 20) feed.removeChild(feed.lastChild);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Chart state helpers ───────────────────────────────────────────────────────
 
-function showChartLoading(show) {
+function setChartLoading(show) {
   document.getElementById('chartLoading').classList.toggle('hidden', !show);
 }
 
@@ -483,10 +512,14 @@ function hideEmpty() {
   document.getElementById('chartEmpty').classList.add('hidden');
 }
 
-function showEmpty(msg) {
-  const el = document.getElementById('chartEmpty');
-  el.textContent = msg || '▲ Select a stock to start analysis';
+function showChartError(msg) {
+  const el  = document.getElementById('chartError');
+  el.textContent = msg;
   el.classList.remove('hidden');
+}
+
+function hideChartError() {
+  document.getElementById('chartError').classList.add('hidden');
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -494,6 +527,4 @@ function showEmpty(msg) {
 updateMarketStatus();
 setInterval(updateMarketStatus, 60000);
 loadWatchlist();
-
-// Auto-refresh watchlist every 2 minutes
 setInterval(loadWatchlist, 120000);

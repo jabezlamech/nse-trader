@@ -7,7 +7,10 @@ Data source priority: Zerodha Kite → Yahoo Finance → Mock data
 import asyncio
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -157,20 +160,22 @@ def search_stocks(q: str = Query(..., min_length=1)):
 
 
 @app.get("/api/quote/{symbol}")
-def get_quote(symbol: str):
-    quote = get_realtime_quote(symbol)
+async def get_quote(symbol: str):
+    loop  = asyncio.get_running_loop()
+    quote = await loop.run_in_executor(_executor, lambda: get_realtime_quote(symbol))
     if "error" in quote:
         raise HTTPException(status_code=404, detail=quote["error"])
     return quote
 
 
 @app.get("/api/candles/{symbol}")
-def get_candles(
+async def get_candles(
     symbol: str,
     interval: str = Query("1d", pattern="^(1m|5m|15m|30m|1h|1d|1wk)$"),
     limit: int = Query(100, ge=10, le=500)
 ):
-    df = get_stock_data(symbol, interval=interval)
+    loop = asyncio.get_running_loop()
+    df   = await loop.run_in_executor(_executor, lambda: get_stock_data(symbol, interval=interval))
     if df.empty:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
 
@@ -178,10 +183,10 @@ def get_candles(
     records = [
         {
             "timestamp": str(ts),
-            "open": round(float(row["open"]), 2),
-            "high": round(float(row["high"]), 2),
-            "low": round(float(row["low"]), 2),
-            "close": round(float(row["close"]), 2),
+            "open":   round(float(row["open"]),   2),
+            "high":   round(float(row["high"]),   2),
+            "low":    round(float(row["low"]),    2),
+            "close":  round(float(row["close"]),  2),
             "volume": int(row["volume"]),
         }
         for ts, row in df.iterrows()
@@ -190,22 +195,28 @@ def get_candles(
 
 
 @app.get("/api/analyze/{symbol}")
-def analyze_stock(
+async def analyze_stock(
     symbol: str,
     interval: str = Query("1d", pattern="^(1m|5m|15m|30m|1h|1d|1wk)$"),
     run_bt: bool = Query(True, alias="backtest")
 ):
     """Full analysis: patterns + backtest + overall signal + recommendation."""
-    df = get_stock_data(symbol, interval=interval)
+    loop = asyncio.get_running_loop()
+
+    # Run blocking I/O in thread pool so the event loop stays responsive
+    df    = await loop.run_in_executor(_executor, lambda: get_stock_data(symbol, interval=interval))
+    quote = await loop.run_in_executor(_executor, lambda: get_realtime_quote(symbol))
+
     if df.empty:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
 
     patterns = detect_all_patterns(df)
     overall_signal, overall_confidence = compute_overall_signal(patterns)
     recommendation = build_recommendation(overall_signal, overall_confidence, patterns)
-    quote = get_realtime_quote(symbol)
 
-    backtest_results = run_backtest(df) if run_bt and len(df) >= 30 else []
+    backtest_results = []
+    if run_bt and len(df) >= 30:
+        backtest_results = await loop.run_in_executor(_executor, lambda: run_backtest(df))
 
     sym_key = symbol if symbol.endswith(".NS") else symbol + ".NS"
 
@@ -232,9 +243,14 @@ def analyze_stock(
 
 
 @app.get("/api/watchlist")
-def get_watchlist_quotes():
-    default_symbols = list(NSE_STOCKS.keys())[:10]
-    return [get_realtime_quote(sym) for sym in default_symbols]
+async def get_watchlist_quotes():
+    loop    = asyncio.get_running_loop()
+    symbols = list(NSE_STOCKS.keys())[:10]
+    # Fetch all quotes in parallel
+    quotes  = await asyncio.gather(
+        *[loop.run_in_executor(_executor, lambda s=sym: get_realtime_quote(s)) for sym in symbols]
+    )
+    return list(quotes)
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
